@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#0b1021">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icon-192.png">
+<title>Servidor-N64 · Cartuchos NFC</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1021;--fg:#f2f5ff;--sub:#b6bdd5;--accent:#a69cff}
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);overscroll-behavior:none}
+body{font:15px/1.5 system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:var(--fg);user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
+#game{position:fixed;inset:0;width:100vw;height:100dvh;overflow:hidden;background:#050509;touch-action:none}
+/* O próprio EmulatorJS desenha o controle analógico e os botões C do Nintendo 64. */
+#game.ejs_parent{height:100dvh!important;width:100vw!important;max-width:none!important}
+#bootOverlay{position:fixed;z-index:70;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center;background:linear-gradient(145deg,#0c142b,#050609);gap:13px}
+#bootOverlay[hidden]{display:none!important}
+#mark{width:84px;height:84px;object-fit:contain;margin-bottom:3px}
+h1{font-size:clamp(21px,5vw,29px);line-height:1.2;margin:0;letter-spacing:.2px}
+#message{max-width:410px;color:var(--sub);margin:0;overflow-wrap:anywhere}
+#progressTrack{width:min(260px,75vw);height:5px;background:#2b3552;border-radius:8px;overflow:hidden}
+#progressBar{height:100%;width:35%;background:var(--accent);border-radius:8px;animation:loading 1.6s ease-in-out infinite alternate}
+@keyframes loading{from{transform:translateX(-90%)}to{transform:translateX(310%)}}
+#action{background:var(--accent);color:#14152a;border:0;border-radius:10px;font:700 14px system-ui;padding:12px 18px;cursor:pointer}
+#action[hidden],#progressTrack[hidden]{display:none!important}
+#subtitle{font-size:12px;color:#8693b7;max-width:360px}
+#subtitle[hidden]{display:none!important}
+@media(prefers-reduced-motion:reduce){#progressBar{animation:none;width:100%}}
+</style>
+</head>
+<body>
+<div id="game" aria-label="Emulador Nintendo 64"></div>
+<section id="bootOverlay" aria-live="polite">
+ <img id="mark" src="./icon-192.png" alt="Nintendo 64" width="84" height="84">
+ <h1>Servidor-N64</h1>
+ <p id="message">Preparando seu cartucho NFC...</p>
+ <div id="progressTrack" role="progressbar" aria-label="Carregando"><div id="progressBar"></div></div>
+ <button id="action" type="button" hidden>Recarregar</button>
+ <small id="subtitle" hidden></small>
+</section>
+<script>
+'use strict';
+/* Servidor-N64: ROMs por nome, sem cadastro. Ex: ?jogo=SM64 -> jogos/SM64.z64 */
+const $=s=>document.querySelector(s);
+const params=new URLSearchParams(location.search);
+const LAST_GAME_KEY='ServidorN64_ultimoJogo_v1';
+const extensions=['z64','n64','v64'];
+const namePattern=/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,95}$/u;
+let started=false, failed=false, timer=0;
+function status(message){$('#message').textContent=message;}
+function error(message,allowRetry=true){
+ if(started||failed)return;failed=true;clearTimeout(timer);
+ status(message);$('#progressTrack').hidden=true;
+ if(allowRetry)$('#action').hidden=false;
+ $('#subtitle').textContent='Confira o nome do arquivo na pasta jogos/ e a conexão com a internet.';
+ $('#subtitle').hidden=false;
+ console.error('[Servidor-N64]',message);
+}
+function selectName(){
+ let name=params.get('jogo');
+ if(!name){try{name=localStorage.getItem(LAST_GAME_KEY)}catch(e){}}
+ if(!name)return null;
+ if(/\.(z64|n64|v64)$/i.test(name))name=name.replace(/\.(z64|n64|v64)$/i,'');
+ if(!namePattern.test(name)||name.includes('..')||/[. ]$/.test(name))
+  throw Error('Nome de ROM inválido. Use, por exemplo, ?jogo=SM64.');
+ return name;
+}
+function candidates(name){
+ const raw=params.get('jogo')||'';
+ const explicit=/\.(z64|n64|v64)$/i.exec(raw);
+ const order=explicit?[explicit[1].toLowerCase(),...extensions.filter(x=>x!==explicit[1].toLowerCase())]:extensions;
+ return order.map(ext=>({file:name+'.'+ext,url:new URL('./jogos/'+encodeURIComponent(name+'.'+ext),location.href).href}));
+}
+async function locateRom(name){
+ for(const candidate of candidates(name)){
+  status('Procurando '+candidate.file+'...');
+  try{
+   const resp=await fetch(candidate.url,{method:'HEAD',cache:'no-store'});
+   if(resp.ok)return candidate;
+  }catch(err){console.warn('[Servidor-N64] Falha ao verificar '+candidate.file,err);}
+ }
+ throw Error('Não encontrei o jogo '+name+' na pasta jogos/. Aceitos: .z64, .n64 e .v64.');
+}
+function loadScript(url){
+ return new Promise((resolve,reject)=>{
+  const script=document.createElement('script');script.async=true;script.src=url;
+  const delay=setTimeout(()=>{script.remove();reject(Error('O download do motor N64 demorou demais.'))},35000);
+  script.onload=()=>{clearTimeout(delay);resolve()};
+  script.onerror=()=>{clearTimeout(delay);reject(Error('Não consegui carregar o motor do emulador. Verifique a internet.'))};
+  document.head.appendChild(script);
+ });
+}
+async function boot(){
+ try{
+  const name=selectName();
+  if(!name){
+   error('Nenhum cartucho selecionado. Adicione uma ROM em jogos/ e abra o endereço com ?jogo=NOME.',false);
+   $('#subtitle').textContent='Exemplo: ?jogo=SM64 abre jogos/SM64.z64';
+   return;
+  }
+  const rom=await locateRom(name);
+  document.title=name+' · Servidor-N64';
+  status('Carregando '+name+'...');
+  window.EJS_player='#game';
+  window.EJS_core='n64';
+  window.EJS_gameUrl=rom.url;
+  window.EJS_gameName=name;
+  window.EJS_pathtodata='https://cdn.emulatorjs.org/stable/data/';
+  window.EJS_startOnLoaded=true;
+  window.EJS_controlScheme='n64';
+  window.EJS_VirtualGamepadSettings={};
+  window.EJS_color='#a69cff';
+  window.EJS_volume=0.75;
+  window.EJS_defaultOptions={
+   shader:'disabled',rewindEnabled:'disabled',fastForward:'disabled',
+   fps:'hide',vsync:'disabled'
+  };
+  window.EJS_onGameStart=()=>{
+   started=true;clearTimeout(timer);$('#bootOverlay').hidden=true;
+   try{localStorage.setItem(LAST_GAME_KEY,name)}catch(e){}
+   console.info('[Servidor-N64] Jogo iniciado:',rom.file);
+  };
+  await loadScript('https://cdn.emulatorjs.org/stable/data/loader.js');
+  timer=setTimeout(()=>{if(!started)error('O emulador N64 não terminou de iniciar. Tente recarregar a página.')},150000);
+ }catch(err){error(err?.message||String(err))}
+}
+// A API de tela cheia do Chrome requer gesto real. Não abre menus/popup ao ler NFC.
+let requesting=false;
+async function attemptFullscreen(){
+ if(!started||requesting||document.fullscreenElement||
+   matchMedia('(display-mode:fullscreen)').matches||!document.documentElement.requestFullscreen)return;
+ requesting=true;
+ try{
+  await document.documentElement.requestFullscreen({navigationUI:'hide'});
+  if(screen.orientation?.lock){try{await screen.orientation.lock('landscape')}catch(e){}}
+ }catch(e){console.info('[Servidor-N64] Tela cheia não autorizada:',e)}
+ finally{requesting=false}
+}
+document.addEventListener('pointerup',e=>{
+ if(e.pointerType==='touch')void attemptFullscreen();
+},{capture:true,passive:true});
+$('#action').addEventListener('click',()=>location.reload());
+window.addEventListener('error',e=>{if(!started&&document.querySelector('#bootOverlay')&&!failed)console.warn('[Servidor-N64]',e.message)});
+boot();
+</script>
+</body>
+</html>
