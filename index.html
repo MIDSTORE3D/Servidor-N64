@@ -76,15 +76,52 @@ function candidates(name){
  const order=explicit?[explicit[1].toLowerCase(),...extensions.filter(x=>x!==explicit[1].toLowerCase())]:extensions;
  return order.map(ext=>({file:name+'.'+ext,url:new URL('./jogos/'+encodeURIComponent(name+'.'+ext),location.href).href}));
 }
+// Os cabeçalhos oficiais das ROMs N64 mudam com a ordenação dos bytes.
+// A extensão do arquivo não altera o reconhecimento do formato.
+const validHeaders=new Set(['80371240','37804012','40123780']);
+async function checkRomHeader(url){
+ const controller=new AbortController();
+ const timeout=setTimeout(()=>controller.abort(),15000);
+ try{
+  const resp=await fetch(url,{headers:{Range:'bytes=0-3'},cache:'no-store',signal:controller.signal});
+  if(!resp.ok)throw Error('HTTP '+resp.status);
+  // Consume somente o começo do fluxo (quando o servidor ignora Range, não
+  // precisamos baixar a ROM inteira uma segunda vez para identificar o arquivo).
+  if(!resp.body?.getReader) {
+   const bytes=new Uint8Array(await resp.arrayBuffer());
+   return bytes.slice(0,4);
+  }
+  const reader=resp.body.getReader();
+  let head=new Uint8Array(4),pos=0;
+  try{
+   while(pos<4){
+    const chunk=await reader.read();
+    if(chunk.done)break;
+    const n=Math.min(4-pos,chunk.value.length);
+    head.set(chunk.value.subarray(0,n),pos);pos+=n;
+   }
+  }finally{try{await reader.cancel();}catch(e){}}
+  return pos===4?head:head.slice(0,pos);
+ }finally{clearTimeout(timeout)}
+}
 async function locateRom(name){
  for(const candidate of candidates(name)){
-  status('Procurando '+candidate.file+'...');
+  status('Verificando '+candidate.file+'...');
   try{
    const resp=await fetch(candidate.url,{method:'HEAD',cache:'no-store'});
-   if(resp.ok)return candidate;
-  }catch(err){console.warn('[Servidor-N64] Falha ao verificar '+candidate.file,err);}
+   if(!resp.ok)continue;
+   const header=await checkRomHeader(candidate.url);
+   const magic=Array.from(header).map(x=>x.toString(16).padStart(2,'0')).join('');
+   if(!validHeaders.has(magic)){
+    throw Error('O arquivo '+candidate.file+' não tem um cabeçalho Nintendo 64 válido. Confirme se é uma ROM descompactada (.z64, .n64 ou .v64).');
+   }
+   return candidate;
+  }catch(err){
+   if(/cabeçalho Nintendo 64 inválido/.test(String(err?.message)))throw err;
+   console.warn('[Servidor-N64] Verificação falhou:',candidate.file,err);
+  }
  }
- throw Error('Não encontrei o jogo '+name+' na pasta jogos/. Aceitos: .z64, .n64 e .v64.');
+ throw Error('Não encontrei o jogo '+name+' na pasta jogos/. Confira a extensão e as letras maiúsculas/minúsculas.');
 }
 function loadScript(url){
  return new Promise((resolve,reject)=>{
@@ -107,12 +144,20 @@ async function boot(){
   document.title=name+' · Servidor-N64';
   status('Carregando '+name+'...');
   window.EJS_player='#game';
-  window.EJS_core='n64';
+  // O ParaLLEl-N64 usa outro renderizador e pode evitar telas pretas em GPUs
+  // que falham com o Mupen64Plus/GLideN64. Use ?motor=mupen para comparar.
+  const selectedMotor=params.get('motor')==='mupen'?'mupen64plus_next':'parallel_n64';
+  window.EJS_core=selectedMotor;
+  // No GitHub Pages não dependemos de SharedArrayBuffer nem de headers COOP/COEP.
+  window.EJS_threads=false;
+  // ?grafico=basico permite testar o renderizador legado (WebGL 1).
+  window.EJS_forceLegacyCores=params.get('grafico')==='basico';
   window.EJS_gameUrl=rom.url;
   window.EJS_gameName=name;
   window.EJS_pathtodata='https://cdn.emulatorjs.org/stable/data/';
   window.EJS_startOnLoaded=true;
   window.EJS_controlScheme='n64';
+  window.EJS_DEBUG_XX=params.get('diagnostico')==='1';
   window.EJS_VirtualGamepadSettings={};
   window.EJS_color='#a69cff';
   window.EJS_volume=0.75;
@@ -123,7 +168,7 @@ async function boot(){
   window.EJS_onGameStart=()=>{
    started=true;clearTimeout(timer);$('#bootOverlay').hidden=true;
    try{localStorage.setItem(LAST_GAME_KEY,name)}catch(e){}
-   console.info('[Servidor-N64] Jogo iniciado:',rom.file);
+   console.info('[Servidor-N64] Núcleo iniciou:',selectedMotor,'| ROM:',rom.file,'| WebGL legado:',window.EJS_forceLegacyCores);
   };
   await loadScript('https://cdn.emulatorjs.org/stable/data/loader.js');
   timer=setTimeout(()=>{if(!started)error('O emulador N64 não terminou de iniciar. Tente recarregar a página.')},150000);
@@ -144,6 +189,9 @@ async function attemptFullscreen(){
 document.addEventListener('pointerup',e=>{
  if(e.pointerType==='touch')void attemptFullscreen();
 },{capture:true,passive:true});
+// O modo ?diagnostico=1 mantém a saída de erro no console sem exibir um menu
+// extra para quem está jogando pelo NFC.
+window.addEventListener('unhandledrejection',e=>console.warn('[Servidor-N64] Falha no emulador:',e.reason));
 $('#action').addEventListener('click',()=>location.reload());
 window.addEventListener('error',e=>{if(!started&&document.querySelector('#bootOverlay')&&!failed)console.warn('[Servidor-N64]',e.message)});
 boot();
